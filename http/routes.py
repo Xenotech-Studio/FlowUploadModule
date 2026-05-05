@@ -42,7 +42,9 @@ def register_upload_routes(
     """在 FastAPI 应用上注册流式上传路由 + SSE 进度路由。
 
     参数：
-      redis_for_progress:        Redis 客户端实例（仅用于进度状态）
+      redis_for_progress:        Redis 客户端实例（仅用于进度状态）；也可传 0 参 callable
+                                  返回实例，用于宿主在 startup 后才赋值的场景，避免
+                                  在模块加载时拿到 None。
       auth_resolver:             (Request) -> user_id；解析失败应抛 HTTPException(401/403)
       auth_resolver_optional:    (Request) -> user_id | None；无 token / 失败返回 None
                                   仅在「无 progress_id」的兼容上传分支用到

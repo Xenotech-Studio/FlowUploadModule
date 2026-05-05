@@ -13,27 +13,57 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
+
+
+# Redis 实例或实例工厂——后者用于宿主在 startup 之后才创建 Redis 连接的场景
+# （例如 Flops 的 redis_client_user 在 @app.on_event("startup") 里赋值，
+#  register_upload_routes 在模块加载阶段即被调用，此时直传实例会拿到 None）。
+RedisLike = Any
+RedisSource = Union[RedisLike, Callable[[], RedisLike]]
 
 
 class ProgressStore:
-    """对单个 (state_prefix, owner_prefix) 命名空间下所有 progress_id 的读写做集中协调。"""
+    """对单个 (state_prefix, owner_prefix) 命名空间下所有 progress_id 的读写做集中协调。
+
+    redis_client 可传：
+      - Redis-like 实例（同步）
+      - 0 参 callable，每次需要 Redis 时调用并返回实例（迟绑定，应对宿主延迟初始化）
+    """
 
     def __init__(
         self,
         *,
-        redis_client: Any,
+        redis_client: RedisSource,
         state_prefix: str,
         owner_prefix: str,
         ttl_sec: int,
     ) -> None:
-        if not redis_client:
+        if redis_client is None:
             raise ValueError("redis_client is required")
-        self._r = redis_client
+        self._r_src: RedisSource = redis_client
         self._sp = str(state_prefix or "")
         self._op = str(owner_prefix or "")
         self._ttl = int(ttl_sec)
         self._locks: Dict[str, threading.Lock] = {}
+
+    def _r(self) -> RedisLike:
+        """每次请求时解析 Redis 实例：callable 工厂 → 调用一次取最新；实例 → 直接返回。
+
+        宿主把 redis_for_progress=lambda: my_redis_client_user 传进来时，每次请求
+        都重新读 my_redis_client_user 的当前值；适合 Redis 在模块 startup 才赋值
+        的场景。
+        """
+        src = self._r_src
+        if callable(src):
+            r = src()
+            if r is None:
+                raise RuntimeError(
+                    "ProgressStore: redis_client callable returned None "
+                    "(Redis 尚未初始化？请确认 startup 已完成)"
+                )
+            return r
+        return src
 
     @staticmethod
     def normalize_pid(raw: Optional[str]) -> Optional[str]:
@@ -66,7 +96,7 @@ class ProgressStore:
     # ---------------- read ----------------
 
     def get_state(self, pid: str) -> Optional[Dict[str, Any]]:
-        raw_b = self._r.get(self._state_key(pid))
+        raw_b = self._r().get(self._state_key(pid))
         if not raw_b:
             return None
         try:
@@ -77,7 +107,7 @@ class ProgressStore:
             return None
 
     def get_owner(self, pid: str) -> Optional[str]:
-        v = self._r.get(self._owner_key(pid))
+        v = self._r().get(self._owner_key(pid))
         if v is None:
             return None
         return v.decode("utf-8") if isinstance(v, bytes) else str(v)
@@ -85,7 +115,7 @@ class ProgressStore:
     # ---------------- write ----------------
 
     def _set_state(self, pid: str, obj: Dict[str, Any]) -> None:
-        self._r.setex(self._state_key(pid), self._ttl, json.dumps(obj, ensure_ascii=False))
+        self._r().setex(self._state_key(pid), self._ttl, json.dumps(obj, ensure_ascii=False))
 
     def begin(
         self,
@@ -104,7 +134,7 @@ class ProgressStore:
             if existing and existing != str(user_id):
                 raise PermissionError("progress_id not owned by current user")
             if not existing:
-                self._r.setex(self._owner_key(pid), self._ttl, str(user_id))
+                self._r().setex(self._owner_key(pid), self._ttl, str(user_id))
             tot = int(expected_total) if expected_total is not None else None
             self._set_state(
                 pid,
