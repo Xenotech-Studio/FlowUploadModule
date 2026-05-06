@@ -36,6 +36,10 @@ def register_upload_routes(
     redis_owner_prefix: str = "flow_upload:f2u_prog_owner:",
     redis_state_ttl_sec: int = 7200,
     extra_form_fields: Optional[List[str]] = None,
+    merge_response: Optional[
+        Callable[[str, int, Request, Optional[str], Optional[str]], dict]
+    ] = None,
+    require_progress_id: bool = False,
     sse_keepalive_interval_sec: float = 0.12,
     sse_max_ticks: int = 48000,
 ) -> ProgressStore:
@@ -60,6 +64,11 @@ def register_upload_routes(
       extra_form_fields:         除 "folder" 之外要解析的多余 form 字段名（值进入 ObjectKeyContext.form_fields）
       sse_keepalive_interval_sec / sse_max_ticks:
                                  SSE 流推送节流；保留默认即可
+      merge_response:            上传成功且已得到 (url, rx_bytes) 后调用：
+                                  (url, rx_bytes, request, user_id, progress_id) -> dict
+                                  返回值 merge 进响应 JSON（在 {"url"} 之后更新）；
+                                  用于云盘等业务在 COS 完成后写入元数据并返回 file 等字段。
+      require_progress_id:       True 时缺少 progress_id 直接 400（强制走流式+进度通道）
 
     返回：
       ProgressStore 实例，调用方可在自定义异步任务中复用同一进度命名空间。
@@ -158,6 +167,9 @@ def register_upload_routes(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid progress_id")
 
+        if require_progress_id and not pid:
+            raise HTTPException(status_code=400, detail="progress_id required")
+
         if pid:
             user_id = auth_resolver(request)
             try:
@@ -192,6 +204,12 @@ def register_upload_routes(
                 )
                 if pid:
                     store.finish_ok(pid, rx_n)
+                out: dict = {"url": result_url}
+                if merge_response is not None:
+                    extra = merge_response(result_url, rx_n, request, user_id, pid)
+                    if extra:
+                        out.update(extra)
+                return out
             except ValueError as ve:
                 msg = str(ve)
                 if pid:
@@ -221,6 +239,5 @@ def register_upload_routes(
                         err_s = str(e)
                     store.finish_err(pid, str(err_s)[:800])
                 raise
-        return {"url": result_url}
 
     return store
