@@ -25,6 +25,7 @@ from __future__ import annotations
 from .cos_upload import (
     file_to_url,
     bytes_to_cos_url,
+    copy_object_to_cos_url,
     multipart_upload_from_chunk_queue,
     get_tencent_credentials,
     set_credentials_provider,
@@ -37,6 +38,7 @@ from .cos_upload import (
 __all__ = [
     "file_to_url",
     "bytes_to_cos_url",
+    "copy_object_to_cos_url",
     "multipart_upload_from_chunk_queue",
     "get_tencent_credentials",
     "set_credentials_provider",

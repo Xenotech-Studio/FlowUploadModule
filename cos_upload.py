@@ -240,6 +240,49 @@ def bytes_to_cos_url(
     return image_url
 
 
+def copy_object_to_cos_url(
+    source_key: str,
+    *,
+    folder_name: str = "",
+    object_name: str = "file.bin",
+    bucket: str = DEFAULT_BUCKET,
+    source_bucket: Optional[str] = None,
+    source_region: Optional[str] = None,
+) -> dict:
+    """
+    在 COS 内部把 source_key 复制成 folder_name/object_name 新 key（同 bucket 默认）。
+    走 PutObjectCopy（服务端 copy），不下载也不上传字节。
+    返回：{"url": 新对象公网 URL, "size_bytes": int|None, "mime_type": str|None}
+    """
+    cfg, client, dest_bucket = _make_cos_client(bucket=bucket)
+    key, _ = _resolve_cos_key(folder_name, object_name)
+    dest_url = cfg.uri(bucket=dest_bucket, path=key)
+
+    src_bucket = source_bucket or dest_bucket
+    src_region = source_region or DEFAULT_REGION
+    copy_source = {"Bucket": src_bucket, "Key": source_key.lstrip("/"), "Region": src_region}
+    client.copy_object(Bucket=dest_bucket, Key=key, CopySource=copy_source, CopyStatus="Copy")
+
+    size_bytes: Optional[int] = None
+    mime_type: Optional[str] = None
+    try:
+        head = client.head_object(Bucket=dest_bucket, Key=key)
+        cl = head.get("Content-Length") if isinstance(head, dict) else None
+        if cl is not None:
+            try:
+                size_bytes = int(cl)
+            except (TypeError, ValueError):
+                size_bytes = None
+        ct = head.get("Content-Type") if isinstance(head, dict) else None
+        if isinstance(ct, str) and ct.strip():
+            mime_type = ct.strip()
+    except Exception:
+        pass
+
+    logging.info("COS copy: %s -> %s", source_key, dest_url)
+    return {"url": dest_url, "size_bytes": size_bytes, "mime_type": mime_type}
+
+
 def multipart_upload_from_chunk_queue(
     q: "Queue[Tuple[str, Any]]",
     *,
