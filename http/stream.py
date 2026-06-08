@@ -17,6 +17,7 @@ import logging
 import queue
 import threading
 import time
+import urllib.parse
 from collections import deque
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -30,6 +31,29 @@ logger = logging.getLogger(__name__)
 _FOLDER_FIELD_LIMIT = 65536
 _OTHER_FIELD_LIMIT = 2048
 _NET_SLICE = 256 * 1024
+
+
+def _decode_multipart_filename(cdopts: Dict[bytes, bytes]) -> str:
+    """从 multipart Content-Disposition 选项里取文件名并正确解码。
+
+    现代浏览器把 filename 的非 ASCII 字符按 UTF-8 字节放进 multipart body；旧代码按
+    latin-1 解码会让中文名乱码并污染 COS key。这里 RFC 5987 的 filename* 优先，否则
+    普通 filename 先按 UTF-8 解，失败再回退 latin-1。
+    """
+    star = cdopts.get(b"filename*")
+    if star:
+        s = star.decode("latin-1", "replace")
+        if "''" in s:
+            charset, _, enc = s.split("'", 2)
+            try:
+                return urllib.parse.unquote(enc, encoding=(charset or "utf-8"), errors="replace")
+            except (LookupError, ValueError):
+                return urllib.parse.unquote(enc, encoding="utf-8", errors="replace")
+    raw = cdopts.get(b"filename", b"file.bin")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1", "replace")
 
 
 async def stream_upload_to_cos(
@@ -165,7 +189,7 @@ async def stream_upload_to_cos(
         if b"filename" in cdopts:
             ctx["current_is_file"] = True
             ctx["file_seen"] = True
-            raw_fn = cdopts.get(b"filename", b"file.bin").decode("latin-1", errors="replace").strip()
+            raw_fn = _decode_multipart_filename(cdopts).strip()
             ctx["safe_name"] = (
                 raw_fn.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or "file.bin"
             )[:512]

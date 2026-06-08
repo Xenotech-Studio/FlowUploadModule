@@ -26,6 +26,7 @@ import sys
 from io import BytesIO
 from queue import Queue
 from typing import Any, Callable, List, Optional, Tuple
+from urllib.parse import quote
 
 from qcloud_cos import CosConfig, CosS3Client
 
@@ -135,11 +136,18 @@ def _resolve_cos_key(folder_name: str, object_name: str) -> Tuple[str, str]:
 
 
 def _content_disposition_attachment(download_filename: Optional[str]) -> Optional[str]:
-    """download_filename 非空时返回 'attachment; filename=...'，让浏览器下载用指定名字。"""
+    """download_filename 非空时返回 Content-Disposition，让浏览器下载用指定名字。
+
+    非 ASCII 文件名按 RFC 5987 走 filename*=UTF-8''<pct-encoded>，并保留 ASCII 回退，
+    避免 UTF-8 字节被 HTTP header(latin-1) 当字符解释而下载名乱码。
+    """
     if not download_filename:
         return None
     dl = download_filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-    return f'attachment; filename="{dl}"'
+    ascii_fallback = (dl.encode("ascii", "replace").decode("ascii").replace("?", "_")) or "file"
+    if dl.isascii():
+        return f'attachment; filename="{ascii_fallback}"'
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(dl, safe='')}"
 
 
 class _CosUploadCountingReader:
