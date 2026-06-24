@@ -110,7 +110,10 @@ def _make_cos_client(
     """
     构造一对 (CosConfig, CosS3Client, resolved_bucket)。
 
-    显式 Proxies={}：与 arXiv / 搜索等共用同一进程时，环境变量 HTTPS_PROXY 可能让 COS 误走代理，强制清空。
+    Proxies={} 单独**不够**：requests 看到空 dict 后仍会按 session.trust_env=True
+    从 HTTPS_PROXY 环境变量回填代理，结果 COS 上传走 Clash 撞 TLS-in-TLS
+    握手 30s 超时（实测：CHAT_FILES 多 part 上传卡 0%）。补上
+    client._session.trust_env=False，彻底断掉环境变量回填。
     """
     sid, sk = get_tencent_credentials()
     cfg = CosConfig(
@@ -120,7 +123,12 @@ def _make_cos_client(
         Scheme=scheme or DEFAULT_SCHEME,
         Proxies={},
     )
-    return cfg, CosS3Client(cfg), (bucket or DEFAULT_BUCKET)
+    client = CosS3Client(cfg)
+    try:
+        client._session.trust_env = False
+    except Exception:
+        pass
+    return cfg, client, (bucket or DEFAULT_BUCKET)
 
 
 def _resolve_cos_key(folder_name: str, object_name: str) -> Tuple[str, str]:
