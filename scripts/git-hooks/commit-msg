@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 拒绝带 AI 署名的提交消息（Co-Authored-By: Claude/Cursor/Copilot… 或 "Generated with Claude Code" 之类）。
+# 启用：git config core.hooksPath scripts/git-hooks   （或装成全局钩子：git config --global core.hooksPath ~/.git-hooks-global）
+set -euo pipefail
+msg_file="$1"
+pattern='noreply@anthropic\.com|cursoragent@cursor\.com|copilot@github\.com|generated with \[?claude code|^\s*co-authored-by:\s*(claude|cursor|codex|copilot|chatgpt|gemini|aider|devin|windsurf)\b'
+if grep -qiE "$pattern" "$msg_file"; then
+    echo "✗ 提交消息包含 AI 署名（Co-Authored-By / Generated with …），请删掉后重试。" >&2
+    echo "  紧急情况可用 git commit --no-verify 跳过（不推荐）。" >&2
+    exit 1
+fi
+exit 0

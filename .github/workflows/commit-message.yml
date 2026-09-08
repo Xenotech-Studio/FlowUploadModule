@@ -1,0 +1,33 @@
+name: commit message check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 拒绝带 AI 署名的提交
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            range="${{ github.event.before }}..${{ github.sha }}"
+          else
+            range="${{ github.sha }} -n 50"
+          fi
+          pattern='noreply@anthropic\.com|cursoragent@cursor\.com|copilot@github\.com|generated with \[?claude code|^\s*co-authored-by:\s*(claude|cursor|codex|copilot|chatgpt|gemini|aider|devin|windsurf)\b'
+          bad=0
+          for c in $(git rev-list $range); do
+            if git log -1 --format=%B "$c" | grep -qiE "$pattern"; then
+              echo "::error::commit $c 含 AI 署名（Co-Authored-By / Generated with …）"
+              bad=1
+            fi
+          done
+          exit "$bad"
