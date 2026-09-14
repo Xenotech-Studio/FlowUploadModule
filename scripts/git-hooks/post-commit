@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# 已注册的个人扩展失败只告警；post-commit 本身保持 no-op。
+source "$(git rev-parse --show-toplevel)/scripts/git-hooks/lib/personal_extension.sh"
+flops_run_personal_hook post-commit post "$@"
+exit 0

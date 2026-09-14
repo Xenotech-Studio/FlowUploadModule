@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# 本地提交门禁：pyright strict / 文档代码引用 / @override 标注 / backend 分层。
+# 已注册的个人扩展先运行；成功后才运行本仓检查。
+source "$(git rev-parse --show-toplevel)/scripts/git-hooks/lib/personal_extension.sh"
+if flops_run_personal_hook pre-commit gate "$@"; then :; else rc=$?; exit "$rc"; fi
+#
+# 启用（每个 clone 只需装一次）：
+#   git config core.hooksPath scripts/git-hooks
+#
+# 四道检查全部对**暂存区**跑，不对工作树跑：先用 git checkout-index 把暂存区导出到
+# 临时目录（索引只有 ~20MB，导出 0.2s），再在那里执行 CI 用的同一批脚本。
+# 这样钩子看到的就是 commit 生效后仓库的样子——部分暂存 / add 漏了目录时，
+# 工作树里改好了但没 stage 的文件不会再让检查"假过"。
+# 导出目录里补软链：node_modules、config.py（未跟踪但 pyright 要）、各子模块目录
+# （checkout-index 不导出 gitlink）。
+#
+# pyright 只在这次提交碰了 pyrightconfig.strict.json 的 include 范围时才跑（~30s），
+# 触发条件直接读那份 include 列表；其余三道纯文本/ast 扫描，秒级，每次都跑。
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# ---------- 导出暂存区 ----------
+stage_dir="$(mktemp -d -t flops-precommit.XXXXXX)"
+trap 'rm -rf "$stage_dir"' EXIT
+
+# 过滤掉 gitlink（mode 160000）：留着会给子模块导出空目录，pyright 会报一堆 unknown import。
+git ls-files -s -z | python3 -c "
+import sys
+for e in sys.stdin.buffer.read().split(b'\0'):
+    if e and not e.startswith(b'160000'):
+        sys.stdout.buffer.write(e.split(b'\t', 1)[1] + b'\0')
+" | git checkout-index -z --stdin --prefix="$stage_dir/"
+
+for extra in node_modules config.py; do
+    [ -e "$extra" ] && ln -s "$repo_root/$extra" "$stage_dir/$extra"
+done
+# 没检出的子模块（空目录）保持空目录，让 check_doc_refs 的"未检出子模块跳过"规则照常生效。
+while IFS= read -r sub; do
+    [ -n "$sub" ] || continue
+    mkdir -p "$stage_dir/$sub"
+    if [ -n "$(ls -A "$repo_root/$sub" 2>/dev/null)" ]; then
+        rmdir "$stage_dir/$sub"
+        ln -s "$repo_root/$sub" "$stage_dir/$sub"
+    fi
+done < <(git ls-files -s | awk '$1 == "160000" { print $4 }')
+
+# ---------- 失败时的提示 ----------
+# 暂存区没过而工作树能过，几乎必然是改好了忘了 stage：把工作树≠暂存区的文件列出来。
+hint_unstaged() {
+    local check_cmd="$1"
+    if (cd "$repo_root" && eval "$check_cmd" >/dev/null 2>&1); then
+        echo "  提示：同一检查在工作树上能通过，说明改好的文件没有 stage。工作树与暂存区不同的文件："
+        { git -C "$repo_root" diff --name-only; git -C "$repo_root" ls-files --others --exclude-standard; } | sed 's/^/    /'
+    fi
+}
+
+staged_in_scope() {
+    git diff --cached --name-only --diff-filter=ACM | python3 -c "
+import json, sys
+staged = [l for l in sys.stdin.read().splitlines() if l]
+with open('pyrightconfig.strict.json') as f:
+    include = json.load(f).get('include', [])
+hit = any(
+    f == prefix or f.startswith(prefix.rstrip('/') + '/')
+    for f in staged for prefix in include
+)
+sys.exit(0 if hit else 1)
+"
+}
+
+# ---------- 四道检查，都在导出目录里跑 ----------
+cd "$stage_dir"
+
+if [ -f "$repo_root/pyrightconfig.strict.json" ] && (cd "$repo_root" && staged_in_scope); then
+    echo "→ 改动命中类型门槛范围，对暂存区跑 pyright strict…"
+    if ! FLOPS_CHECK_ROOT="$stage_dir" ./scripts/check_strict_types.sh; then
+        echo ""
+        echo "✗ pyright strict 检查未通过，提交被拦截。"
+        hint_unstaged "./scripts/check_strict_types.sh"
+        echo "  紧急情况可用 git commit --no-verify 跳过（不推荐，会带回类型债）。"
+        exit 1
+    fi
+    echo "✓ 类型检查通过"
+fi
+
+# 文档代码引用（[`唯一片段`](路径#L行号)）：目标存在、片段唯一、行号未漂。
+if [ -f "$repo_root/scripts/check_doc_refs.py" ] && ! python3 scripts/check_doc_refs.py; then
+    echo ""
+    echo "✗ 文档引用校验未通过。行号漂了的跑: python3 scripts/check_doc_refs.py --fix，然后记得 git add docs/"
+    hint_unstaged "python3 scripts/check_doc_refs.py"
+    exit 1
+fi
+
+# 覆写标注（继承内核类的产品类：覆写必标 @override、标了的基类必须有）。
+if ! python3 scripts/check_overrides.py; then
+    echo ""
+    echo "✗ 覆写标注校验未通过。缺标的跑: python3 scripts/check_overrides.py --fix，然后记得 git add"
+    hint_unstaged "python3 scripts/check_overrides.py"
+    exit 1
+fi
+
+# backend/ 分层（import 只准往下指）。
+if ! python3 scripts/check_layers.py; then
+    echo ""
+    echo "✗ 分层校验未通过：低层 import 了高层（规则见 docs/BACKEND-LAYOUT.md）。"
+    hint_unstaged "python3 scripts/check_layers.py"
+    exit 1
+fi
+
+exit 0

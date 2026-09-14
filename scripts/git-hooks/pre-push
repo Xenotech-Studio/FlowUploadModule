@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# submodule-push 守门员：保证主仓 push 出去的 submodule 指针在子仓远端可达（递归到嵌套子模块）。
+# 用法：
+#   作为 pre-push 钩子运行（stdin: <local_ref> <local_sha> <remote_ref> <remote_sha> 行）
+#   bash scripts/git-hooks/pre-push --ci   # CI 全量模式：检查 HEAD 全部子模块 gitlink
+# 拦截条件：本次 push 变动的 gitlink SHA（或它内部锁定的嵌套 gitlink SHA）在对应子仓
+#           任何远端分支上都不存在 → 拒绝 push。
+set -u
+ZERO=0000000000000000000000000000000000000000
+CI=0; [ "${1:-}" = "--ci" ] && CI=1
+TOP="$(git rev-parse --show-toplevel)"
+PUSH_STDIN=''
+cleanup_push_stdin() { [ -z "$PUSH_STDIN" ] || rm -f "$PUSH_STDIN"; }
+if [ "$CI" -eq 0 ]; then
+  PUSH_STDIN="$(mktemp "${TMPDIR:-/tmp}/flops-pre-push.XXXXXX")" || exit 1
+  trap cleanup_push_stdin EXIT
+  if cat >"$PUSH_STDIN"; then :; else rc=$?; exit "$rc"; fi
+fi
+
+# pre-push 的 ref 清单须同时交给个人扩展、子模块门禁和消息门禁；三者都读快照。
+source "$TOP/scripts/git-hooks/lib/personal_extension.sh"
+if [ "$CI" -eq 0 ]; then
+  if flops_run_personal_hook pre-push gate "$@" <"$PUSH_STDIN"; then :; else rc=$?; exit "$rc"; fi
+else
+  if flops_run_personal_hook pre-push gate "$@"; then :; else rc=$?; exit "$rc"; fi
+fi
+
+FAIL=0; N_CHECK=0; N_SKIP=0
+VISITED=""          # 防环：已验过的 "<子仓目录>@<sha>" 组合
+MAX_DEPTH=8
+
+pad_of() { printf '%*s' "$(( $1 * 2 + 2 ))" ''; }
+
+# 验一个 gitlink：$1=子仓工作目录 $2=sha $3=展示路径 $4=层级
+check_link() {
+  local smdir="$1" sha="$2" disp="$3" depth="$4" pad key
+  pad="$(pad_of "$depth")"
+  key="$smdir@$sha"
+  case " $VISITED " in *" $key "*) return 0 ;; esac
+  VISITED="$VISITED $key"
+
+  if [ "$depth" -ge "$MAX_DEPTH" ]; then
+    echo "${pad}SKIP $disp: 嵌套深度超过 $MAX_DEPTH，停止递归"; N_SKIP=$((N_SKIP+1)); return 0
+  fi
+  if [ ! -e "$smdir/.git" ]; then
+    echo "${pad}SKIP $disp: 子模块未初始化，无法验证 ${sha:0:9}"; N_SKIP=$((N_SKIP+1)); return 0
+  fi
+  N_CHECK=$((N_CHECK+1))
+  if ! git -C "$smdir" cat-file -e "$sha^{commit}" </dev/null 2>/dev/null; then
+    echo "${pad}✗ $disp: gitlink ${sha:0:9} 在本地子仓不存在（先 git submodule update）" >&2
+    FAIL=1; return 0
+  fi
+  if ! git -C "$smdir" remote get-url origin </dev/null >/dev/null 2>&1; then
+    echo "${pad}SKIP $disp: 子仓无 origin remote，跳过可达性判断"; N_SKIP=$((N_SKIP+1))
+  else
+    git -C "$smdir" fetch -q origin </dev/null 2>/dev/null || \
+      echo "${pad}! $disp: fetch origin 失败（离线？改用本地 remote-tracking 判断）" >&2
+    if ! git -C "$smdir" branch -r --contains "$sha" </dev/null 2>/dev/null | grep -q .; then
+      echo "${pad}✗ $disp: ${sha:0:9} 不在子仓任何远端分支上 —— 请先 push 子仓，再 push 主仓" >&2
+      FAIL=1; return 0
+    fi
+  fi
+  check_nested "$smdir" "$sha" "$disp" "$depth"
+}
+
+# 递归：读 $2 这个 commit 树里的 .gitmodules（不是工作区的），逐个验它锁定的嵌套 gitlink
+check_nested() {
+  local smdir="$1" sha="$2" disp="$3" depth="$4" ndepth pad gm tmp npath nsha
+  ndepth=$((depth+1)); pad="$(pad_of "$ndepth")"
+  gm="$(git -C "$smdir" show "$sha:.gitmodules" 2>/dev/null)" || return 0
+  [ -n "$gm" ] || return 0
+  tmp="$(mktemp)"; printf '%s\n' "$gm" >"$tmp"
+  while IFS= read -r npath; do
+    [ -n "$npath" ] || continue
+    npath="${npath%/}"
+    nsha="$(git -C "$smdir" ls-tree "$sha" "$npath" 2>/dev/null | awk '$2=="commit"{print $3}')"
+    if [ -z "$nsha" ] || [ "$nsha" = "$ZERO" ]; then
+      echo "${pad}SKIP $disp/$npath: .gitmodules 有声明但该 commit 树中无 gitlink"; N_SKIP=$((N_SKIP+1)); continue
+    fi
+    if [ ! -e "$smdir/$npath/.git" ]; then
+      echo "${pad}SKIP 嵌套未初始化 $disp/$npath: 本地无该子仓对象库，未验证 ${nsha:0:9}"
+      N_SKIP=$((N_SKIP+1)); continue
+    fi
+    check_link "$smdir/$npath" "$nsha" "$disp/$npath" "$ndepth"
+  done < <(git config -f "$tmp" --get-regexp '^submodule\..*\.path$' 2>/dev/null | cut -d' ' -f2-)
+  rm -f "$tmp"
+}
+
+check_one() { check_link "$TOP/${1%/}" "$2" "${1%/}" 0; }
+
+all_paths() { git config -f "$TOP/.gitmodules" --get-regexp '^submodule\..*\.path$' 2>/dev/null | cut -d' ' -f2-; }
+link_of() { git -C "$TOP" ls-tree "$1" "$2" | awk '$2=="commit"{print $3}'; }
+
+if [ "$CI" -eq 1 ]; then
+  while IFS= read -r p; do
+    sha="$(link_of HEAD "$p")"
+    [ -n "$sha" ] && [ "$sha" != "$ZERO" ] && check_one "$p" "$sha"
+  done < <(all_paths)
+else
+  while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue   # 删除远端分支，不检查
+    if [ "$remote_sha" = "$ZERO" ]; then
+      # 新分支：全量检查当前全部子模块
+      while IFS= read -r p; do
+        sha="$(link_of "$local_sha" "$p")"
+        [ -n "$sha" ] && check_one "$p" "$sha"
+      done < <(all_paths)
+    else
+      # 增量：只查本次范围内容变动的 gitlink（mode 160000）
+      while IFS=$'\t' read -r sha p; do
+        [ -n "$sha" ] && [ "$sha" != "$ZERO" ] && check_one "$p" "$sha"
+      done < <(git -C "$TOP" diff --raw --abbrev=40 "$remote_sha..$local_sha" 2>/dev/null | awk -F'\t' '$1 ~ /^:160000/ {split($1,a," "); if (a[4] !~ /^0+$/) print a[4] "\t" $2}')
+    fi
+  done <"$PUSH_STDIN"
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+  echo "submodule-push 检查未通过（检查 ${N_CHECK} 跳过 ${N_SKIP}）—— 先 push 上述子仓再重试。" >&2
+  exit 1
+fi
+
+# ── 提交消息门禁：本次 push 范围内每条提交都过一遍 message 规范（单一事实源 lib/commit_msg_check.sh）。
+#    覆盖本地钩子拦不住的通道：git am（patch 回传）、git subtree add（squash 提交）、
+#    commit-tree / revert 等不触发 commit-msg 的操作。
+if [ "$CI" -eq 0 ]; then
+  LIB="$TOP/scripts/git-hooks/lib/commit_msg_check.sh"
+  if [ -f "$LIB" ]; then
+    MSG_FAIL=0; MSG_N=0
+    while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+      [ "$local_sha" = "$ZERO" ] && continue
+      [ "$remote_sha" = "$ZERO" ] && continue                       # 新分支：无增量基线，跳过
+      # 本次 push 新增的提交（图序，老→新）
+      NEW="$(git -C "$TOP" rev-list --reverse --topo-order "$remote_sha..$local_sha")"
+      [ -n "$NEW" ] || continue
+      for c in $NEW; do
+        MSG_N=$((MSG_N+1))
+        # git-subtree 的 Squashed/Merge 前缀提交豁免（message 由工具硬编码生成，非人写）
+        subj="$(git -C "$TOP" log -1 --format=%s "$c" </dev/null)"
+        case "$subj" in "Squashed "*|"Merge commit "*|"Merge pull request"*) continue ;; esac
+        TMPMSG="$(mktemp)"
+        git -C "$TOP" log -1 --format=%B "$c" </dev/null > "$TMPMSG"
+        if ! bash "$LIB" "$TMPMSG" --commit "$c" </dev/null >/dev/null 2>&1; then
+          echo "✗ 提交消息不合规: $c $(echo "$subj" | head -c 44)" >&2
+          bash "$LIB" "$TMPMSG" --commit "$c" </dev/null 2>&1 | head -3 >&2
+          MSG_FAIL=1
+        fi
+        rm -f "$TMPMSG"
+      done
+    done <"$PUSH_STDIN"
+    if [ "$MSG_FAIL" -ne 0 ]; then
+      echo "commit message 检查未通过（${MSG_N} 条已扫）—— git commit --amend 后重试，或 git rebase -i 修正。" >&2
+      exit 1
+    fi
+  fi
+fi
+
+exit 0

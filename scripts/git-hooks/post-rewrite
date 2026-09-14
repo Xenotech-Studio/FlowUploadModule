@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# post-rewrite 的 old/new 映射在 stdin；快照后交给个人扩展，避免消费原始管道。
+POST_REWRITE_STDIN="$(mktemp "${TMPDIR:-/tmp}/flops-post-rewrite.XXXXXX")" || exit 0
+cleanup_post_rewrite_stdin() { rm -f "$POST_REWRITE_STDIN"; }
+trap cleanup_post_rewrite_stdin EXIT
+if ! cat >"$POST_REWRITE_STDIN"; then
+  echo "! 无法读取 post-rewrite stdin；已跳过个人扩展。" >&2
+  exit 0
+fi
+source "$(git rev-parse --show-toplevel)/scripts/git-hooks/lib/personal_extension.sh"
+flops_run_personal_hook post-rewrite post "$@" <"$POST_REWRITE_STDIN"
+exit 0
