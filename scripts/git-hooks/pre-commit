@@ -94,7 +94,7 @@ if [ -f "$repo_root/scripts/check_doc_refs.py" ] && ! python3 scripts/check_doc_
 fi
 
 # 覆写标注（继承内核类的产品类：覆写必标 @override、标了的基类必须有）。
-if ! python3 scripts/check_overrides.py; then
+if [ -f "$repo_root/scripts/check_overrides.py" ] && ! python3 scripts/check_overrides.py; then
     echo ""
     echo "✗ 覆写标注校验未通过。缺标的跑: python3 scripts/check_overrides.py --fix，然后记得 git add"
     hint_unstaged "python3 scripts/check_overrides.py"
@@ -102,7 +102,7 @@ if ! python3 scripts/check_overrides.py; then
 fi
 
 # backend/ 分层（import 只准往下指）。
-if ! python3 scripts/check_layers.py; then
+if [ -f "$repo_root/scripts/check_layers.py" ] && ! python3 scripts/check_layers.py; then
     echo ""
     echo "✗ 分层校验未通过：低层 import 了高层（规则见 docs/devdoc/BACKEND-LAYOUT.md）。"
     hint_unstaged "python3 scripts/check_layers.py"
