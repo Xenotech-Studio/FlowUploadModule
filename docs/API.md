@@ -325,6 +325,7 @@ def register_upload_routes(
     redis_owner_prefix: str = "flow_upload:f2u_prog_owner:",
     redis_state_ttl_sec: int = 7200,
     extra_form_fields: Optional[List[str]] = None,
+    on_uploaded: Optional[Callable[[str, str, str], None]] = None,
     sse_keepalive_interval_sec: float = 0.12,
     sse_max_ticks: int = 48000,
 ) -> ProgressStore
@@ -345,6 +346,7 @@ def register_upload_routes(
 | `redis_owner_prefix` | `str` | ❌ | Redis owner 映射 key 前缀；默认 `flow_upload:f2u_prog_owner:` |
 | `redis_state_ttl_sec` | `int` | ❌ | 进度 / owner 在 Redis 上的过期时间；默认 7200（2 小时） |
 | `extra_form_fields` | `List[str] \| None` | ❌ | 除 `folder` 之外要解析并塞进 `ObjectKeyContext.form_fields` 的 multipart 字段名 |
+| `on_uploaded` | `(url, filename, content_type) -> None` | ❌ | 两条上传分支均在 COS 成功后、HTTP/进度成功前调用；文件名为对象名前缀添加前的安全原始名。异常使请求失败，COS 对象可能已存在，由调用方处理重试/清理。 |
 | `sse_keepalive_interval_sec` | `float` | ❌ | SSE 帧间隔；默认 0.12 秒 |
 | `sse_max_ticks` | `int` | ❌ | SSE 最大帧数（防止无限循环）；默认 48000，对应约 96 分钟 |
 

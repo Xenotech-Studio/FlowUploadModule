@@ -36,6 +36,7 @@ def register_upload_routes(
     redis_owner_prefix: str = "flow_upload:f2u_prog_owner:",
     redis_state_ttl_sec: int = 7200,
     extra_form_fields: Optional[List[str]] = None,
+    on_uploaded: Optional[Callable[[str, str, str], None]] = None,
     merge_response: Optional[
         Callable[[str, int, Request, Optional[str], Optional[str]], dict]
     ] = None,
@@ -69,6 +70,8 @@ def register_upload_routes(
                                   返回值 merge 进响应 JSON（在 {"url"} 之后更新）；
                                   用于云盘等业务在 COS 完成后写入元数据并返回 file 等字段。
       require_progress_id:       True 时缺少 progress_id 直接 400（强制走流式+进度通道）
+      on_uploaded:               COS 成功后、响应/进度成功前调用 (url, filename, content_type)。
+                                  filename 是加对象名前缀之前的安全原始名；异常使上传请求失败。
 
     返回：
       ProgressStore 实例，调用方可在自定义异步任务中复用同一进度命名空间。
@@ -201,6 +204,7 @@ def register_upload_routes(
                     on_server_receive_bytes=on_sr_bytes,
                     on_server_receive_done=on_sr_done,
                     on_cos_uploaded_bytes=on_cos,
+                    on_uploaded=on_uploaded,
                 )
                 if pid:
                     store.finish_ok(pid, rx_n)

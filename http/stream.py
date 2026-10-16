@@ -69,6 +69,7 @@ async def stream_upload_to_cos(
     on_server_receive_bytes: Optional[Callable[[int], None]] = None,
     on_server_receive_done: Optional[Callable[[int], None]] = None,
     on_cos_uploaded_bytes: Optional[Callable[[int], None]] = None,
+    on_uploaded: Optional[Callable[[str, str, str], None]] = None,
 ) -> Tuple[str, int]:
     """解析 multipart 并把文件 part 流式上传到 COS。
 
@@ -299,6 +300,8 @@ async def stream_upload_to_cos(
         if bucket:
             cos_kwargs["bucket"] = bucket
         url = await asyncio.to_thread(bytes_to_cos_url, body, **cos_kwargs)
+        if on_uploaded is not None:
+            on_uploaded(url, str(ctx["safe_name"]), str(ctx["ctype"]))
         return url, len(body)
 
     assert q is not None
@@ -314,4 +317,6 @@ async def stream_upload_to_cos(
     url = str(cos_holder["out"].get("url") or "").strip()
     if not url:
         raise RuntimeError("flow_upload: COS consumer returned empty url")
+    if on_uploaded is not None:
+        on_uploaded(url, str(ctx["safe_name"]), str(ctx["ctype"]))
     return url, int(rx["n"])
